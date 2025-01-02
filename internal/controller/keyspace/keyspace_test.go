@@ -335,7 +335,7 @@ func TestUpdate(t *testing.T) {
 					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
 						expectedQuery := "ALTER KEYSPACE \"example_keyspace\" WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 2} AND durable_writes = true"
 						if query != expectedQuery {
-						
+
 							return errors.New("unexpected query: " + query)
 						}
 						return nil
@@ -344,7 +344,7 @@ func TestUpdate(t *testing.T) {
 			},
 			args: args{
 				mg: &v1alpha1.Keyspace{
-					ObjectMeta: metav1.ObjectMeta {
+					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
 							"crossplane.io/external-name": "example_keyspace",
 						},
@@ -404,5 +404,206 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
+func TestCreate(t *testing.T) {
+	errBoom := errors.New("boom")
 
-// Additional test functions (Create, Update, Delete) can be written following a similar structure.
+	type fields struct {
+		db cassandra.DB
+	}
+
+	type args struct {
+		ctx context.Context
+		mg  resource.Managed
+	}
+
+	type want struct {
+		c   managed.ExternalCreation
+		err error
+	}
+
+	cases := map[string]struct {
+		reason string
+		fields fields
+		args   args
+		want   want
+	}{
+		"ErrNotKeyspace": {
+			reason: "Should return an error if the managed resource is not a *Keyspace",
+			args: args{
+				mg: nil,
+			},
+			want: want{
+				err: errors.New(errNotKeyspace),
+			},
+		},
+		"CreateKeyspaceSuccess": {
+			reason: "Should successfully create the keyspace if the create query succeeds",
+			fields: fields{
+				db: &cassandra.MockDB{
+					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
+						expectedQuery := "CREATE KEYSPACE IF NOT EXISTS \"example_keyspace\" WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 2} AND durable_writes = true"
+						if query != expectedQuery {
+							return errors.New("unexpected query: " + query)
+						}
+						return nil
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							"crossplane.io/external-name": "example_keyspace",
+						},
+					},
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass:  pointerToString("SimpleStrategy"),
+							ReplicationFactor: pointerToInt(2),
+							DurableWrites:     pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				c:   managed.ExternalCreation{},
+				err: nil,
+			},
+		},
+		"CreateKeyspaceFailure": {
+			reason: "Should return an error if the create query fails",
+			fields: fields{
+				db: &cassandra.MockDB{
+					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
+						return errBoom
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							"crossplane.io/external-name": "example_keyspace",
+						},
+					},
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass:  pointerToString("SimpleStrategy"),
+							ReplicationFactor: pointerToInt(2),
+							DurableWrites:     pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				c:   managed.ExternalCreation{},
+				err: errors.New(errCreateKeyspace + ": " + errBoom.Error()),
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := external{db: tc.fields.db}
+			got, err := e.Create(tc.args.ctx, tc.args.mg)
+			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\nCreate(...): -want error, +got error:\n%s\n", tc.reason, diff)
+			}
+			if diff := cmp.Diff(tc.want.c, got); diff != "" {
+				t.Errorf("\n%s\nCreate(...): -want, +got:\n%s\n", tc.reason, diff)
+			}
+		})
+	}
+}
+
+func TestDelete(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	type fields struct {
+		db cassandra.DB
+	}
+
+	type args struct {
+		ctx context.Context
+		mg  resource.Managed
+	}
+
+	type want struct {
+		err error
+	}
+
+	cases := map[string]struct {
+		reason string
+		fields fields
+		args   args
+		want   want
+	}{
+		"ErrNotKeyspace": {
+			reason: "Should return an error if the managed resource is not a *Keyspace",
+			args: args{
+				mg: nil,
+			},
+			want: want{
+				err: errors.New(errNotKeyspace),
+			},
+		},
+		"DeleteKeyspaceSuccess": {
+			reason: "Should successfully delete the keyspace if the delete query succeeds",
+			fields: fields{
+				db: &cassandra.MockDB{
+					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
+						expectedQuery := "DROP KEYSPACE IF EXISTS \"example_keyspace\""
+						if query != expectedQuery {
+							return errors.New("unexpected query: " + query)
+						}
+						return nil
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							"crossplane.io/external-name": "example_keyspace",
+						},
+					},
+				},
+			},
+			want: want{
+				err: nil,
+			},
+		},
+		"DeleteKeyspaceFailure": {
+			reason: "Should return an error if the delete query fails",
+			fields: fields{
+				db: &cassandra.MockDB{
+					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
+						return errBoom
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							"crossplane.io/external-name": "example_keyspace",
+						},
+					},
+				},
+			},
+			want: want{
+				err: errors.New(errDropKeyspace + ": " + errBoom.Error()),
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := external{db: tc.fields.db}
+			err := e.Delete(tc.args.ctx, tc.args.mg)
+			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\nDelete(...): -want error, +got error:\n%s\n", tc.reason, diff)
+			}
+		})
+	}
+}
