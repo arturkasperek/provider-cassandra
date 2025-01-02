@@ -18,6 +18,7 @@ package role
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/pkg/errors"
@@ -28,9 +29,14 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/connection"
 	"github.com/crossplane/crossplane-runtime/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/pkg/event"
+	"github.com/crossplane/crossplane-runtime/pkg/meta"
+	"github.com/crossplane/crossplane-runtime/pkg/password"
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
+	"github.com/crossplane/provider-cassandra/internal/clients/cassandra"
+
+	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 
 	"github.com/crossplane/provider-cassandra/apis/cql/v1alpha1"
 	apisv1alpha1 "github.com/crossplane/provider-cassandra/apis/v1alpha1"
@@ -38,19 +44,17 @@ import (
 )
 
 const (
-	errNotRole    = "managed resource is not a Role custom resource"
+	errNotRole      = "managed resource is not a Role custom resource"
 	errTrackPCUsage = "cannot track ProviderConfig usage"
 	errGetPC        = "cannot get ProviderConfig"
 	errGetCreds     = "cannot get credentials"
 
-	errNewClient = "cannot create new Service"
-)
-
-// A NoOpService does nothing.
-type NoOpService struct{}
-
-var (
-	newNoOpService = func(_ []byte) (interface{}, error) { return &NoOpService{}, nil }
+	errNewClient   = "cannot create new Service"
+	errSelectRole  = "cannot select role"
+	errCreateRole  = "cannot create role"
+	errUpdateRole  = "cannot update role"
+	errDropRole    = "cannot drop role"
+	maxConcurrency = 5
 )
 
 // Setup adds a controller that reconciles Role managed resources.
@@ -65,9 +69,9 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 	r := managed.NewReconciler(mgr,
 		resource.ManagedKind(v1alpha1.RoleGroupVersionKind),
 		managed.WithExternalConnecter(&connector{
-			kube:         mgr.GetClient(),
-			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
-			newServiceFn: newNoOpService}),
+			kube:      mgr.GetClient(),
+			usage:     resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
+			newClient: cassandra.New}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
@@ -84,16 +88,11 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 // A connector is expected to produce an ExternalClient when its Connect method
 // is called.
 type connector struct {
-	kube         client.Client
-	usage        resource.Tracker
-	newServiceFn func(creds []byte) (interface{}, error)
+	kube      client.Client
+	usage     resource.Tracker
+	newClient func(creds map[string][]byte, keyspace string) *cassandra.CassandraDB
 }
 
-// Connect typically produces an ExternalClient by:
-// 1. Tracking that the managed resource is using a ProviderConfig.
-// 2. Getting the managed resource's ProviderConfig.
-// 3. Getting the credentials specified by the ProviderConfig.
-// 4. Using the credentials to form a client.
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
 	cr, ok := mg.(*v1alpha1.Role)
 	if !ok {
@@ -110,25 +109,31 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	}
 
 	cd := pc.Spec.Credentials
-	data, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
+	credsData, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
 	if err != nil {
 		return nil, errors.Wrap(err, errGetCreds)
 	}
 
-	svc, err := c.newServiceFn(data)
-	if err != nil {
-		return nil, errors.Wrap(err, errNewClient)
+	// Convert the byte array to a string and parse the JSON
+	credsJSON := string(credsData)
+	var credsMap map[string]string
+	if err := json.Unmarshal([]byte(credsJSON), &credsMap); err != nil {
+		return nil, errors.Wrap(err, "failed to parse credentials JSON")
 	}
 
-	return &external{service: svc}, nil
+	// Convert map[string]string to map[string][]byte
+	creds := make(map[string][]byte)
+	for k, v := range credsMap {
+		creds[k] = []byte(v)
+	}
+
+	db := c.newClient(creds, "")
+
+	return &external{db: db}, nil
 }
 
-// An ExternalClient observes, then either creates, updates, or deletes an
-// external resource to ensure it reflects the managed resource's desired state.
 type external struct {
-	// A 'client' used to connect to the external resource API. In practice this
-	// would be something like an AWS SDK client.
-	service interface{}
+	db *cassandra.CassandraDB
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -137,23 +142,34 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotRole)
 	}
 
-	// These fmt statements should be removed in the real implementation.
-	fmt.Printf("Observing: %+v", cr)
+	query := "SELECT is_superuser, can_login FROM system_auth.roles WHERE role = ?"
+	var isSuperuser, canLogin bool
+	iter, err := c.db.Query(ctx, query, meta.GetExternalName(cr))
+	if err != nil {
+		return managed.ExternalObservation{}, errors.Wrap(err, errSelectRole)
+	}
+	defer iter.Close()
+
+	if !iter.Scan(&isSuperuser, &canLogin) {
+		return managed.ExternalObservation{
+			ResourceExists:   false,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
+	observed := &v1alpha1.RoleParameters{
+		Privileges: v1alpha1.RolePrivilege{
+			SuperUser: &isSuperuser,
+			Login:     &canLogin,
+		},
+	}
+
+	cr.SetConditions(xpv1.Available())
 
 	return managed.ExternalObservation{
-		// Return false when the external resource does not exist. This lets
-		// the managed resource reconciler know that it needs to call Create to
-		// (re)create the resource, or that it has successfully been deleted.
-		ResourceExists: true,
-
-		// Return false when the external resource exists, but it not up to date
-		// with the desired managed resource state. This lets the managed
-		// resource reconciler know that it needs to call Update.
-		ResourceUpToDate: true,
-
-		// Return any details that may be required to connect to the external
-		// resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
+		ResourceExists:          true,
+		ResourceLateInitialized: lateInit(observed, &cr.Spec.ForProvider),
+		ResourceUpToDate:        upToDate(observed, &cr.Spec.ForProvider),
 	}, nil
 }
 
@@ -163,12 +179,26 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.New(errNotRole)
 	}
 
-	fmt.Printf("Creating: %+v", cr)
+	pw, err := password.Generate()
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+
+	params := cr.Spec.ForProvider
+	query := fmt.Sprintf("CREATE ROLE IF NOT EXISTS %s WITH SUPERUSER = %t AND LOGIN = %t AND PASSWORD = '%s'",
+		cassandra.QuoteIdentifier(meta.GetExternalName(cr)),
+		params.Privileges.SuperUser != nil && *params.Privileges.SuperUser,
+		params.Privileges.Login != nil && *params.Privileges.Login,
+		pw)
+
+	if err := c.db.Exec(ctx, query); err != nil {
+		return managed.ExternalCreation{}, errors.New(errCreateRole + ": " + err.Error())
+	}
+
+	connectionDetails := c.db.GetConnectionDetails(meta.GetExternalName(cr), pw)
 
 	return managed.ExternalCreation{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
+		ConnectionDetails: connectionDetails,
 	}, nil
 }
 
@@ -178,13 +208,17 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalUpdate{}, errors.New(errNotRole)
 	}
 
-	fmt.Printf("Updating: %+v", cr)
+	params := cr.Spec.ForProvider
+	query := fmt.Sprintf("ALTER ROLE %s WITH SUPERUSER = %t AND LOGIN = %t",
+		cassandra.QuoteIdentifier(meta.GetExternalName(cr)),
+		params.Privileges.SuperUser != nil && *params.Privileges.SuperUser,
+		params.Privileges.Login != nil && *params.Privileges.Login)
 
-	return managed.ExternalUpdate{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
+	if err := c.db.Exec(ctx, query); err != nil {
+		return managed.ExternalUpdate{}, errors.New(errUpdateRole + ": " + err.Error())
+	}
+
+	return managed.ExternalUpdate{}, nil
 }
 
 func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
@@ -193,7 +227,35 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
 		return errors.New(errNotRole)
 	}
 
-	fmt.Printf("Deleting: %+v", cr)
+	query := fmt.Sprintf("DROP ROLE IF EXISTS %s", cassandra.QuoteIdentifier(meta.GetExternalName(cr)))
+	if err := c.db.Exec(ctx, query); err != nil {
+		return errors.New(errDropRole + ": " + err.Error())
+	}
 
 	return nil
+}
+
+func upToDate(observed *v1alpha1.RoleParameters, desired *v1alpha1.RoleParameters) bool {
+	if observed.Privileges.SuperUser == nil || desired.Privileges.SuperUser == nil || *observed.Privileges.SuperUser != *desired.Privileges.SuperUser {
+		return false
+	}
+	if observed.Privileges.Login == nil || desired.Privileges.Login == nil || *observed.Privileges.Login != *desired.Privileges.Login {
+		return false
+	}
+	return true
+}
+
+func lateInit(observed *v1alpha1.RoleParameters, desired *v1alpha1.RoleParameters) bool {
+	li := false
+
+	if desired.Privileges.SuperUser == nil {
+		desired.Privileges.SuperUser = observed.Privileges.SuperUser
+		li = true
+	}
+	if desired.Privileges.Login == nil {
+		desired.Privileges.Login = observed.Privileges.Login
+		li = true
+	}
+
+	return li
 }
