@@ -187,6 +187,97 @@ func TestObserve(t *testing.T) {
 				},
 			},
 		},
+		"LateInit": {
+			reason: "Should return LateInit if some params need be backfiled",
+			fields: fields{
+				db: &cassandra.MockDB{
+					QueryFunc: func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {
+						return &gocql.Iter{}, nil
+					},
+					ScanFunc: func(iter *gocql.Iter, dest ...interface{}) bool {
+						if len(dest) == 1 {
+							if name, ok := dest[0].(*string); ok {
+								*name = "example_keyspace"
+							}
+							return true
+						} else if len(dest) == 2 {
+							if replicationMap, ok := dest[0].(*map[string]string); ok {
+								(*replicationMap)["class"] = "SimpleStrategy"
+								(*replicationMap)["replication_factor"] = "2"
+							}
+							if durableWrites, ok := dest[1].(**bool); ok && durableWrites != nil {
+								*durableWrites = pointerToBool(true)
+							}
+							return true
+						}
+						return false
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass: pointerToString("SimpleStrategy"),
+							DurableWrites:    pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				o: managed.ExternalObservation{
+					ResourceExists:          true,
+					ResourceUpToDate:        true,
+					ResourceLateInitialized: true,
+				},
+			},
+		},
+		"ResourceOutdated": {
+			reason: "Should return ResourceUpToDate: false if out of date",
+			fields: fields{
+				db: &cassandra.MockDB{
+					QueryFunc: func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {
+						return &gocql.Iter{}, nil
+					},
+					ScanFunc: func(iter *gocql.Iter, dest ...interface{}) bool {
+						if len(dest) == 1 {
+							if name, ok := dest[0].(*string); ok {
+								*name = "example_keyspace"
+							}
+							return true
+						} else if len(dest) == 2 {
+							if replicationMap, ok := dest[0].(*map[string]string); ok {
+								(*replicationMap)["class"] = "SimpleStrategy"
+								(*replicationMap)["replication_factor"] = "3"
+							}
+							if durableWrites, ok := dest[1].(**bool); ok && durableWrites != nil {
+								*durableWrites = pointerToBool(true)
+							}
+							return true
+						}
+						return false
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass:  pointerToString("SimpleStrategy"),
+							ReplicationFactor: pointerToInt(2),
+							DurableWrites:     pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				o: managed.ExternalObservation{
+					ResourceExists:          true,
+					ResourceUpToDate:        false,
+					ResourceLateInitialized: false,
+				},
+			},
+		},
 	}
 
 	for name, tc := range cases {
