@@ -33,6 +33,20 @@ const (
 	defaultCassandraPort = 9042
 )
 
+type DB interface {
+	// Exec executes a CQL statement.
+	Exec(ctx context.Context, query string, args ...interface{}) error
+
+	// Query performs a query and returns an iterator for the results.
+	Query(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error)
+
+	// Close closes the Cassandra session.
+	Close()
+
+	// GetConnectionDetails returns the connection details for a user of this DB.
+	GetConnectionDetails(username, password string) managed.ConnectionDetails
+}
+
 type CassandraDB struct {
 	session  *gocql.Session
 	endpoint string
@@ -40,7 +54,7 @@ type CassandraDB struct {
 }
 
 // New initializes a new Cassandra client.
-func New(creds map[string][]byte, keyspace string) *CassandraDB {
+func New(creds map[string][]byte, keyspace string) DB {
 	endpoint := string(creds[xpv1.ResourceCredentialsSecretEndpointKey])
 	port := string(creds[xpv1.ResourceCredentialsSecretPortKey])
 
@@ -64,7 +78,7 @@ func New(creds map[string][]byte, keyspace string) *CassandraDB {
 	cluster.Consistency = gocql.All
 	session, _ := cluster.CreateSession()
 
-	return &CassandraDB{
+	return CassandraDB{
 		session:  session,
 		endpoint: endpoint,
 		port:     port,
@@ -72,7 +86,7 @@ func New(creds map[string][]byte, keyspace string) *CassandraDB {
 }
 
 // Exec executes a CQL statement and returns an error if the session is not available or the execution fails.
-func (c *CassandraDB) Exec(ctx context.Context, query string, args ...interface{}) error {
+func (c CassandraDB) Exec(ctx context.Context, query string, args ...interface{}) error {
 	if c.session == nil {
 		return errors.New("Cassandra session is not initialized")
 	}
@@ -86,7 +100,7 @@ func (c *CassandraDB) Exec(ctx context.Context, query string, args ...interface{
 }
 
 // Query performs a query and returns an iterator for the results or an error if the session is not available.
-func (c *CassandraDB) Query(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {
+func (c CassandraDB) Query(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {
 	if c.session == nil {
 		return nil, errors.New("cassandra session is not initialized")
 	}
@@ -100,14 +114,14 @@ func (c *CassandraDB) Query(ctx context.Context, query string, args ...interface
 }
 
 // Close closes the Cassandra session.
-func (c *CassandraDB) Close() {
+func (c CassandraDB) Close() {
 	if c.session != nil {
 		c.session.Close()
 	}
 }
 
 // GetConnectionDetails returns the connection details for a user of this DB.
-func (c *CassandraDB) GetConnectionDetails(username, password string) managed.ConnectionDetails {
+func (c CassandraDB) GetConnectionDetails(username, password string) managed.ConnectionDetails {
 	return managed.ConnectionDetails{
 		xpv1.ResourceCredentialsSecretUserKey:     []byte(username),
 		xpv1.ResourceCredentialsSecretPasswordKey: []byte(password),

@@ -95,7 +95,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 type connector struct {
 	kube      client.Client
 	usage     resource.Tracker
-	newClient func(creds map[string][]byte, keyspace string) *cassandra.CassandraDB
+	newClient func(creds map[string][]byte, keyspace string) cassandra.DB
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
@@ -138,7 +138,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 }
 
 type external struct {
-	db *cassandra.CassandraDB
+	db cassandra.DB
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
