@@ -19,8 +19,8 @@ metadata:
 stringData:
   credentials: |
     {
-      "username": "cassandra",
-      "password": "cassandra",
+      "username": "admin",
+      "password": "pass123",
       "endpoint": "localhost",
       "port": "9042"
     }

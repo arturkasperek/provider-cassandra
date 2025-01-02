@@ -424,8 +424,11 @@ spec:
               atProvider:
                 description: GrantObservation are the observable fields of a Grant.
                 properties:
-                  observableField:
-                    type: string
+                  privileges:
+                    description: Privileges represents the applied privileges
+                    items:
+                      type: string
+                    type: array
                 type: object
               conditions:
                 description: Conditions of the resource.

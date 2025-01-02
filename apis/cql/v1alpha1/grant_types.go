@@ -73,7 +73,8 @@ type GrantParameters struct {
 
 // GrantObservation are the observable fields of a Grant.
 type GrantObservation struct {
-	ObservableField string `json:"observableField,omitempty"`
+	// Privileges represents the applied privileges
+	Privileges []string `json:"privileges,omitempty"`
 }
 
 // A GrantSpec defines the desired state of a Grant.
