@@ -150,7 +150,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 	defer iter.Close()
 
-	if !iter.Scan(&isSuperuser, &canLogin) {
+	if !c.db.Scan(iter, &isSuperuser, &canLogin) {
 		return managed.ExternalObservation{
 			ResourceExists:   false,
 			ResourceUpToDate: false,

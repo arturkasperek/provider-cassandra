@@ -160,7 +160,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 
 	observedPermissions := make(map[string]bool)
 	resourceExists := false
-	for iter.Scan(&permissions) {
+	for c.db.Scan(iter, &permissions) {
 		for _, p := range permissions {
 			observedPermissions[p] = true
 		}
