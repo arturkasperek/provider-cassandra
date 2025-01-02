@@ -4,18 +4,18 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.14.0
-  name: mytypes.sample.template.crossplane.io
+  name: roles.cql.cassandra.crossplane.io
 spec:
-  group: sample.template.crossplane.io
+  group: cql.cassandra.crossplane.io
   names:
     categories:
     - crossplane
     - managed
-    - template
-    kind: MyType
-    listKind: MyTypeList
-    plural: mytypes
-    singular: mytype
+    - cassandra
+    kind: Role
+    listKind: RoleList
+    plural: roles
+    singular: role
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -34,7 +34,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: A MyType is an example API type.
+        description: A Role is an example API type.
         properties:
           apiVersion:
             description: |-
@@ -54,7 +54,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: A MyTypeSpec defines the desired state of a MyType.
+            description: A RoleSpec defines the desired state of a Role.
             properties:
               deletionPolicy:
                 default: Delete
@@ -71,12 +71,19 @@ spec:
                 - Delete
                 type: string
               forProvider:
-                description: MyTypeParameters are the configurable fields of a MyType.
+                description: RoleParameters are the configurable fields of a Role.
                 properties:
-                  configurableField:
-                    type: string
-                required:
-                - configurableField
+                  privileges:
+                    description: Privileges to be granted.
+                    properties:
+                      login:
+                        description: Login grants LOGIN when true, allowing the role
+                          to login to the server.
+                        type: boolean
+                      superUser:
+                        description: SuperUser grants SUPERUSER privilege when true.
+                        type: boolean
+                    type: object
                 type: object
               managementPolicies:
                 default:
@@ -246,17 +253,13 @@ spec:
             - forProvider
             type: object
           status:
-            description: A MyTypeStatus represents the observed state of a MyType.
+            description: A RoleStatus represents the observed state of a Role.
             properties:
               atProvider:
-                description: MyTypeObservation are the observable fields of a MyType.
+                description: RoleObservation are the observable fields of a Role.
                 properties:
-                  configurableField:
-                    type: string
                   observableField:
                     type: string
-                required:
-                - configurableField
                 type: object
               conditions:
                 description: Conditions of the resource.
