@@ -2,9 +2,10 @@ package keyspace
 
 import (
 	"context"
-	"github.com/pkg/errors"
 	"testing"
+
 	"github.com/gocql/gocql"
+	"github.com/pkg/errors"
 
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
@@ -15,24 +16,36 @@ import (
 	"github.com/crossplane/provider-cassandra/internal/clients/cassandra"
 )
 
+func pointerToString(s string) *string {
+	return &s
+}
+
+func pointerToInt(i int) *int {
+	return &i
+}
+
+func pointerToBool(b bool) *bool {
+	return &b
+}
+
 func TestConnect(t *testing.T) {
 	errBoom := errors.New("boom")
 
 	type fields struct {
-			kube      resource.ClientApplicator
-			usage     resource.Tracker
-			newClient func(creds map[string][]byte, keyspace string) cassandra.DB
-		}
+		kube      resource.ClientApplicator
+		usage     resource.Tracker
+		newClient func(creds map[string][]byte, keyspace string) cassandra.DB
+	}
 
 	type args struct {
-			ctx context.Context
-			mg  resource.Managed
-		}
+		ctx context.Context
+		mg  resource.Managed
+	}
 
 	type want struct {
-			client managed.ExternalClient
-			err    error
-		}
+		client managed.ExternalClient
+		err    error
+	}
 
 	cases := map[string]struct {
 		reason string
@@ -114,7 +127,7 @@ func TestObserve(t *testing.T) {
 			fields: fields{
 				db: &cassandra.MockDB{
 					QueryFunc: func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {
-						return nil, nil
+						return &gocql.Iter{}, nil
 					},
 					ScanFunc: func(iter *gocql.Iter, dest ...interface{}) bool { return false },
 				},
@@ -125,6 +138,52 @@ func TestObserve(t *testing.T) {
 			want: want{
 				o: managed.ExternalObservation{
 					ResourceExists: false,
+				},
+			},
+		},
+		"KeyspaceExists": {
+			reason: "Should return ResourceExists: true when the keyspace exists",
+			fields: fields{
+				db: &cassandra.MockDB{
+					QueryFunc: func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {
+						return &gocql.Iter{}, nil
+					},
+					ScanFunc: func(iter *gocql.Iter, dest ...interface{}) bool {
+						if len(dest) == 1 {
+							if name, ok := dest[0].(*string); ok {
+								*name = "example_keyspace"
+							}
+							return true
+						} else if len(dest) == 2 {
+							if replicationMap, ok := dest[0].(*map[string]string); ok {
+								(*replicationMap)["class"] = "SimpleStrategy"
+								(*replicationMap)["replication_factor"] = "2"
+							}
+							if durableWrites, ok := dest[1].(**bool); ok && durableWrites != nil {
+								*durableWrites = pointerToBool(true)
+							}
+							return true
+						}
+						return false
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass:  pointerToString("SimpleStrategy"),
+							ReplicationFactor: pointerToInt(2),
+							DurableWrites:     pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				o: managed.ExternalObservation{
+					ResourceExists:          true,
+					ResourceUpToDate:        true,
+					ResourceLateInitialized: false,
 				},
 			},
 		},
