@@ -150,7 +150,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 	defer existsIter.Close()
 
-	if !existsIter.Scan(&keyspaceName) {
+	if !c.db.Scan(existsIter, &keyspaceName) {
 		// Keyspace does not exist
 		return managed.ExternalObservation{
 			ResourceExists:   false,
@@ -172,7 +172,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	defer detailsIter.Close()
 
 	replicationMap := map[string]string{}
-	if !detailsIter.Scan(&replicationMap, &observed.DurableWrites) {
+	if !c.db.Scan(detailsIter, &replicationMap, &observed.DurableWrites) {
 		return managed.ExternalObservation{}, errors.New("failed to scan keyspace attributes")
 	}
 

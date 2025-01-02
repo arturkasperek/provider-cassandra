@@ -40,6 +40,9 @@ type DB interface {
 	// Query performs a query and returns an iterator for the results.
 	Query(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error)
 
+	// scans
+	Scan(iter *gocql.Iter, dest ...interface{}) bool
+
 	// Close closes the Cassandra session.
 	Close()
 
@@ -111,6 +114,11 @@ func (c CassandraDB) Query(ctx context.Context, query string, args ...interface{
 	}
 
 	return iter, nil
+}
+
+// Query performs scan on a iter
+func (c CassandraDB) Scan(iter *gocql.Iter, dest ...interface{}) bool {
+	return iter.Scan(dest...)
 }
 
 // Close closes the Cassandra session.
