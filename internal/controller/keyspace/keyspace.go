@@ -18,20 +18,25 @@ package keyspace
 
 import (
 	"context"
-	"fmt"
+	"strconv"
+	"strings"
+	"encoding/json"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/provider-cassandra/internal/clients/cassandra"
+
+	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/connection"
 	"github.com/crossplane/crossplane-runtime/pkg/controller"
 	"github.com/crossplane/crossplane-runtime/pkg/event"
+	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
-	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/crossplane/provider-cassandra/apis/cql/v1alpha1"
 	apisv1alpha1 "github.com/crossplane/provider-cassandra/apis/v1alpha1"
@@ -40,11 +45,17 @@ import (
 
 const (
 	errNotKeyspace    = "managed resource is not a Keyspace custom resource"
-	errTrackPCUsage = "cannot track ProviderConfig usage"
-	errGetPC        = "cannot get ProviderConfig"
-	errGetCreds     = "cannot get credentials"
-
-	errNewClient = "cannot create new Service"
+	errTrackPCUsage   = "cannot track ProviderConfig usage"
+	errGetPC          = "cannot get ProviderConfig"
+	errGetCreds       = "cannot get credentials"
+	errNewClient      = "cannot create new Service"
+	errSelectKeyspace = "cannot select keyspace"
+	errCreateKeyspace = "cannot create keyspace"
+	errUpdateKeyspace = "cannot update keyspace"
+	errDropKeyspace   = "cannot drop keyspace"
+	maxConcurrency    = 5
+	defaultStrategy   = "SimpleStrategy"
+	defaultReplicas   = 1
 )
 
 // A NoOpService does nothing.
@@ -68,7 +79,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		managed.WithExternalConnecter(&connector{
 			kube:         mgr.GetClient(),
 			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
-			newServiceFn: newNoOpService}),
+			newClient: cassandra.New}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
@@ -82,19 +93,12 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
 }
 
-// A connector is expected to produce an ExternalClient when its Connect method
-// is called.
 type connector struct {
-	kube         client.Client
-	usage        resource.Tracker
-	newServiceFn func(creds []byte) (interface{}, error)
+	kube      client.Client
+	usage     resource.Tracker
+	newClient func(creds map[string][]byte, keyspace string) *cassandra.CassandraDB
 }
 
-// Connect typically produces an ExternalClient by:
-// 1. Tracking that the managed resource is using a ProviderConfig.
-// 2. Getting the managed resource's ProviderConfig.
-// 3. Getting the credentials specified by the ProviderConfig.
-// 4. Using the credentials to form a client.
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
 	cr, ok := mg.(*v1alpha1.Keyspace)
 	if !ok {
@@ -111,25 +115,32 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	}
 
 	cd := pc.Spec.Credentials
-	data, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
+	credsData, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
 	if err != nil {
 		return nil, errors.Wrap(err, errGetCreds)
 	}
 
-	svc, err := c.newServiceFn(data)
-	if err != nil {
-		return nil, errors.Wrap(err, errNewClient)
+	// Convert the byte array to a string and parse the JSON
+	credsJSON := string(credsData)
+	var credsMap map[string]string
+	if err := json.Unmarshal([]byte(credsJSON), &credsMap); err != nil {
+		return nil, errors.Wrap(err, "failed to parse credentials JSON")
 	}
 
-	return &external{service: svc}, nil
+	// Convert map[string]string to map[string][]byte
+	creds := make(map[string][]byte)
+	for k, v := range credsMap {
+		creds[k] = []byte(v)
+	}
+
+	db := c.newClient(creds, "")
+
+	return &external{db: db}, nil
 }
 
-// An ExternalClient observes, then either creates, updates, or deletes an
-// external resource to ensure it reflects the managed resource's desired state.
+
 type external struct {
-	// A 'client' used to connect to the external resource API. In practice this
-	// would be something like an AWS SDK client.
-	service interface{}
+	db *cassandra.CassandraDB
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -138,25 +149,59 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotKeyspace)
 	}
 
-	// These fmt statements should be removed in the real implementation.
-	fmt.Printf("Observing: %+v", cr)
+	// Separate query to check if the resource exists
+	existsQuery := "SELECT keyspace_name FROM system_schema.keyspaces WHERE keyspace_name = ?"
+	var keyspaceName string
+	existsIter, err := c.db.Query(ctx, existsQuery, meta.GetExternalName(cr))
+	if err != nil {
+		return managed.ExternalObservation{}, errors.Wrap(err, "failed to check keyspace existence")
+	}
+	defer existsIter.Close()
+
+	if !existsIter.Scan(&keyspaceName) {
+		// Keyspace does not exist
+		return managed.ExternalObservation{
+			ResourceExists:   false,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
+	observed := &v1alpha1.KeyspaceParameters{
+		ReplicationClass:  new(string),
+		ReplicationFactor: new(int),
+		DurableWrites:     new(bool),
+	}
+
+	detailsQuery := "SELECT replication, durable_writes FROM system_schema.keyspaces WHERE keyspace_name = ?"
+	detailsIter, err := c.db.Query(ctx, detailsQuery, meta.GetExternalName(cr))
+	if err != nil {
+		return managed.ExternalObservation{}, errors.Wrap(err, errSelectKeyspace)
+	}
+	defer detailsIter.Close()
+
+	replicationMap := map[string]string{}
+	if !detailsIter.Scan(&replicationMap, &observed.DurableWrites) {
+		return managed.ExternalObservation{}, errors.New("failed to scan keyspace attributes")
+	}
+
+	if rc, ok := replicationMap["class"]; ok {
+		// Remove Cassandra prefix if present.
+		if strings.HasPrefix(rc, "org.apache.cassandra.locator.") {
+			rc = strings.TrimPrefix(rc, "org.apache.cassandra.locator.")
+		}
+		*observed.ReplicationClass = rc
+	}
+	if rf, ok := replicationMap["replication_factor"]; ok {
+		rfInt, _ := strconv.Atoi(rf)
+		*observed.ReplicationFactor = rfInt
+	}
 
 	cr.SetConditions(xpv1.Available())
 
 	return managed.ExternalObservation{
-		// Return false when the external resource does not exist. This lets
-		// the managed resource reconciler know that it needs to call Create to
-		// (re)create the resource, or that it has successfully been deleted.
-		ResourceExists: true,
-
-		// Return false when the external resource exists, but it not up to date
-		// with the desired managed resource state. This lets the managed
-		// resource reconciler know that it needs to call Update.
-		ResourceUpToDate: true,
-
-		// Return any details that may be required to connect to the external
-		// resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
+		ResourceExists:          true,
+		ResourceLateInitialized: lateInit(observed, &cr.Spec.ForProvider),
+		ResourceUpToDate:        upToDate(observed, &cr.Spec.ForProvider),
 	}, nil
 }
 
@@ -166,13 +211,30 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.New(errNotKeyspace)
 	}
 
-	fmt.Printf("Creating: %+v", cr)
+	params := cr.Spec.ForProvider
+	strategy := defaultStrategy
+	if params.ReplicationClass != nil {
+		strategy = *params.ReplicationClass
+	}
 
-	return managed.ExternalCreation{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
+	replicationFactor := defaultReplicas
+	if params.ReplicationFactor != nil {
+		replicationFactor = *params.ReplicationFactor
+	}
+
+	durableWrites := true
+	if params.DurableWrites != nil {
+		durableWrites = *params.DurableWrites
+	}
+
+	query := "CREATE KEYSPACE IF NOT EXISTS " + cassandra.QuoteIdentifier(meta.GetExternalName(cr)) +
+		" WITH replication = {'class': '" + strategy + "', 'replication_factor': " + strconv.Itoa(replicationFactor) + "} AND durable_writes = " + strconv.FormatBool(durableWrites)
+
+	if err := c.db.Exec(ctx, query); err != nil {
+		return managed.ExternalCreation{}, errors.New(errCreateKeyspace + ": " + err.Error())
+	}
+
+	return managed.ExternalCreation{}, nil
 }
 
 func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
@@ -181,13 +243,30 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalUpdate{}, errors.New(errNotKeyspace)
 	}
 
-	fmt.Printf("Updating: %+v", cr)
+	params := cr.Spec.ForProvider
+	strategy := defaultStrategy
+	if params.ReplicationClass != nil {
+		strategy = *params.ReplicationClass
+	}
 
-	return managed.ExternalUpdate{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
+	replicationFactor := defaultReplicas
+	if params.ReplicationFactor != nil {
+		replicationFactor = *params.ReplicationFactor
+	}
+
+	durableWrites := true
+	if params.DurableWrites != nil {
+		durableWrites = *params.DurableWrites
+	}
+
+	query := "ALTER KEYSPACE " + cassandra.QuoteIdentifier(meta.GetExternalName(cr)) +
+		" WITH replication = {'class': '" + strategy + "', 'replication_factor': " + strconv.Itoa(replicationFactor) + "} AND durable_writes = " + strconv.FormatBool(durableWrites)
+
+	if err := c.db.Exec(ctx, query); err != nil {
+		return managed.ExternalUpdate{}, errors.New(errUpdateKeyspace + ": " + err.Error())
+	}
+
+	return managed.ExternalUpdate{}, nil
 }
 
 func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
@@ -196,7 +275,42 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
 		return errors.New(errNotKeyspace)
 	}
 
-	fmt.Printf("Deleting: %+v", cr)
+	query := "DROP KEYSPACE IF EXISTS " + cassandra.QuoteIdentifier(meta.GetExternalName(cr))
+	if err := c.db.Exec(ctx, query); err != nil {
+		return errors.New(errDropKeyspace + ": " + err.Error())
+	}
 
 	return nil
+}
+
+func upToDate(observed *v1alpha1.KeyspaceParameters, desired *v1alpha1.KeyspaceParameters) bool {
+	if observed.ReplicationClass == nil || desired.ReplicationClass == nil || *observed.ReplicationClass != *desired.ReplicationClass {
+		return false
+	}
+	if observed.ReplicationFactor == nil || desired.ReplicationFactor == nil || *observed.ReplicationFactor != *desired.ReplicationFactor {
+		return false
+	}
+	if observed.DurableWrites == nil || desired.DurableWrites == nil || *observed.DurableWrites != *desired.DurableWrites {
+		return false
+	}
+	return true
+}
+
+func lateInit(observed *v1alpha1.KeyspaceParameters, desired *v1alpha1.KeyspaceParameters) bool {
+	li := false
+
+	if desired.ReplicationClass == nil {
+		desired.ReplicationClass = observed.ReplicationClass
+		li = true
+	}
+	if desired.ReplicationFactor == nil {
+		desired.ReplicationFactor = observed.ReplicationFactor
+		li = true
+	}
+	if desired.DurableWrites == nil {
+		desired.DurableWrites = observed.DurableWrites
+		li = true
+	}
+
+	return li
 }
