@@ -7,6 +7,8 @@ import (
 	"github.com/gocql/gocql"
 	"github.com/pkg/errors"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
@@ -293,5 +295,114 @@ func TestObserve(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdate(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	type fields struct {
+		db cassandra.DB
+	}
+
+	type args struct {
+		ctx context.Context
+		mg  resource.Managed
+	}
+
+	type want struct {
+		u   managed.ExternalUpdate
+		err error
+	}
+
+	cases := map[string]struct {
+		reason string
+		fields fields
+		args   args
+		want   want
+	}{
+		"ErrNotKeyspace": {
+			reason: "Should return an error if the managed resource is not a *Keyspace",
+			args: args{
+				mg: nil,
+			},
+			want: want{
+				err: errors.New(errNotKeyspace),
+			},
+		},
+		"UpdateKeyspaceSuccess": {
+			reason: "Should successfully update the keyspace if the update query succeeds",
+			fields: fields{
+				db: &cassandra.MockDB{
+					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
+						expectedQuery := "ALTER KEYSPACE \"example_keyspace\" WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 2} AND durable_writes = true"
+						if query != expectedQuery {
+						
+							return errors.New("unexpected query: " + query)
+						}
+						return nil
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					ObjectMeta: metav1.ObjectMeta {
+						Annotations: map[string]string{
+							"crossplane.io/external-name": "example_keyspace",
+						},
+					},
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass:  pointerToString("SimpleStrategy"),
+							ReplicationFactor: pointerToInt(2),
+							DurableWrites:     pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				u:   managed.ExternalUpdate{},
+				err: nil,
+			},
+		},
+		"UpdateKeyspaceFailure": {
+			reason: "Should return an error if the update query fails",
+			fields: fields{
+				db: &cassandra.MockDB{
+					ExecFunc: func(ctx context.Context, query string, args ...interface{}) error {
+						return errBoom
+					},
+				},
+			},
+			args: args{
+				mg: &v1alpha1.Keyspace{
+					Spec: v1alpha1.KeyspaceSpec{
+						ForProvider: v1alpha1.KeyspaceParameters{
+							ReplicationClass:  pointerToString("SimpleStrategy"),
+							ReplicationFactor: pointerToInt(2),
+							DurableWrites:     pointerToBool(true),
+						},
+					},
+				},
+			},
+			want: want{
+				u:   managed.ExternalUpdate{},
+				err: errors.New(errUpdateKeyspace + ": " + errBoom.Error()),
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := external{db: tc.fields.db}
+			got, err := e.Update(tc.args.ctx, tc.args.mg)
+			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\nUpdate(...): -want error, +got error:\n%s\n", tc.reason, diff)
+			}
+			if diff := cmp.Diff(tc.want.u, got); diff != "" {
+				t.Errorf("\n%s\nUpdate(...): -want, +got:\n%s\n", tc.reason, diff)
+			}
+		})
+	}
+}
+
 
 // Additional test functions (Create, Update, Delete) can be written following a similar structure.
