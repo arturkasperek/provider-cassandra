@@ -3,8 +3,8 @@ kind: Provider
 metadata:
   name: provider-cassandra
   annotations:
-    meta.crossplane.io/maintainer: Crossplane Maintainers <info@crossplane.io>
-    meta.crossplane.io/source: github.com/crossplane/provider-cassandra
+    meta.crossplane.io/maintainer: Artur Kasperek <arturmiks@gmail.com>
+    meta.crossplane.io/source: github.com/arturkasperek/provider-cassandra
     meta.crossplane.io/license: Apache-2.0
     meta.crossplane.io/description: |
-      A cassandra that can be used to create Crossplane providers.
+      The Crossplane Cassandra Provider enables seamless management of Cassandra resources within Crossplane. It facilitates the provisioning, configuration, and lifecycle management of Cassandra databases, allowing users to declaratively manage their Cassandra infrastructure using Crossplane's powerful control plane.
