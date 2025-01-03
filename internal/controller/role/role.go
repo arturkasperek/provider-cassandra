@@ -57,6 +57,8 @@ const (
 	maxConcurrency = 5
 )
 
+var generatePassword = password.Generate
+
 // Setup adds a controller that reconciles Role managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.RoleGroupKind)
@@ -179,7 +181,7 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.New(errNotRole)
 	}
 
-	pw, err := password.Generate()
+	pw, err := generatePassword()
 	if err != nil {
 		return managed.ExternalCreation{}, err
 	}
