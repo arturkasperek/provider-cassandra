@@ -36,10 +36,10 @@ IMAGES = provider-cassandra
 # ====================================================================================
 # Setup XPKG
 
-XPKG_REG_ORGS ?= xpkg.upbound.io/arturkasperek
+XPKG_REG_ORGS ?= xpkg.upbound.io/arturkasperek-org
 # NOTE(hasheddan): skip promoting on xpkg.upbound.io as channel tags are
 # inferred.
-XPKG_REG_ORGS_NO_PROMOTE ?= xpkg.upbound.io/arturkasperek
+XPKG_REG_ORGS_NO_PROMOTE ?= xpkg.upbound.io/arturkasperek-org
 XPKGS = provider-cassandra
 -include build/makelib/xpkg.mk
 
