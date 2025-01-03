@@ -45,8 +45,7 @@ func TestConnect(t *testing.T) {
 	}
 
 	type want struct {
-		client managed.ExternalClient
-		err    error
+		err error
 	}
 
 	cases := map[string]struct {
@@ -190,7 +189,7 @@ func TestObserve(t *testing.T) {
 			},
 		},
 		"LateInit": {
-			reason: "Should return LateInit if some params need be backfiled",
+			reason: "Should return LateInit if some params need be backfield",
 			fields: fields{
 				db: &cassandra.MockDB{
 					QueryFunc: func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error) {

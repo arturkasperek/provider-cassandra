@@ -10,10 +10,10 @@ import (
 )
 
 type MockDB struct {
-	ExecFunc                func(ctx context.Context, query string, args ...interface{}) error
-	QueryFunc               func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error)
-	ScanFunc                func(iter *gocql.Iter, dest ...interface{}) bool
-	CloseFunc               func()
+	ExecFunc                 func(ctx context.Context, query string, args ...interface{}) error
+	QueryFunc                func(ctx context.Context, query string, args ...interface{}) (*gocql.Iter, error)
+	ScanFunc                 func(iter *gocql.Iter, dest ...interface{}) bool
+	CloseFunc                func()
 	GetConnectionDetailsFunc func(username, password string) managed.ConnectionDetails
 }
 

@@ -150,7 +150,12 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errSelectRole)
 	}
-	defer iter.Close()
+
+	defer func() {
+		if closeErr := iter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
 
 	if !c.db.Scan(iter, &isSuperuser, &canLogin) {
 		return managed.ExternalObservation{

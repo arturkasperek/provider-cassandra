@@ -55,13 +55,6 @@ const (
 	maxConcurrency  = 5
 )
 
-// A NoOpService does nothing.
-type NoOpService struct{}
-
-var (
-	newNoOpService = func(_ []byte) (interface{}, error) { return &NoOpService{}, nil }
-)
-
 // Setup adds a controller that reconciles Grant managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.GrantGroupKind)
@@ -156,7 +149,12 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errGrantObserve)
 	}
-	defer iter.Close()
+
+	defer func() {
+		if closeErr := iter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
 
 	observedPermissions := make(map[string]bool)
 	resourceExists := false

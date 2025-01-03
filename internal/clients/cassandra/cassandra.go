@@ -20,17 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/gocql/gocql"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
-)
-
-const (
-	defaultCassandraPort = 9042
 )
 
 type DB interface {
@@ -136,15 +131,6 @@ func (c CassandraDB) GetConnectionDetails(username, password string) managed.Con
 		xpv1.ResourceCredentialsSecretEndpointKey: []byte(c.endpoint),
 		xpv1.ResourceCredentialsSecretPortKey:     []byte(c.port),
 	}
-}
-
-// Helper function to parse port.
-func parsePort(port string) int {
-	p, err := strconv.Atoi(port)
-	if err != nil {
-		return defaultCassandraPort
-	}
-	return p
 }
 
 // QuoteIdentifier safely quotes an identifier to prevent SQL injection.

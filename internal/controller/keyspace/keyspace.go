@@ -148,7 +148,12 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, "failed to check keyspace existence")
 	}
-	defer existsIter.Close()
+
+	defer func() {
+		if closeErr := existsIter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
 
 	if !c.db.Scan(existsIter, &keyspaceName) {
 		// Keyspace does not exist
@@ -169,7 +174,12 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errSelectKeyspace)
 	}
-	defer detailsIter.Close()
+
+	defer func() {
+		if closeErr := detailsIter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
 
 	replicationMap := map[string]string{}
 	if !c.db.Scan(detailsIter, &replicationMap, &observed.DurableWrites) {
@@ -178,9 +188,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 
 	if rc, ok := replicationMap["class"]; ok {
 		// Remove Cassandra prefix if present.
-		if strings.HasPrefix(rc, "org.apache.cassandra.locator.") {
-			rc = strings.TrimPrefix(rc, "org.apache.cassandra.locator.")
-		}
+		rc = strings.TrimPrefix(rc, "org.apache.cassandra.locator.")
 		*observed.ReplicationClass = rc
 	}
 	if rf, ok := replicationMap["replication_factor"]; ok {

@@ -206,10 +206,18 @@ func TestCreate(t *testing.T) {
 				},
 			},
 			args: args{
-				mg: &v1alpha1.Grant{},
+				mg: &v1alpha1.Grant{
+					Spec: v1alpha1.GrantSpec{
+						ForProvider: v1alpha1.GrantParameters{
+							Role:       pointerToString("example_role"),
+							Keyspace:   pointerToString("example_keyspace"),
+							Privileges: []v1alpha1.GrantPrivilege{"SELECT"},
+						},
+					},
+				},
 			},
 			want: want{
-				err: errors.New(errGrantCreate + ": " + errBoom.Error()),
+				err: errors.Wrap(errBoom, errGrantCreate),
 			},
 		},
 	}

@@ -37,7 +37,6 @@ type RolePrivilege struct {
 	Login *bool `json:"login,omitempty"`
 }
 
-
 // RoleParameters are the configurable fields of a Role.
 type RoleParameters struct {
 	// Privileges to be granted.

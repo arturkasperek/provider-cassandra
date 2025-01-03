@@ -18,14 +18,6 @@ import (
 	"github.com/crossplane/provider-cassandra/internal/clients/cassandra"
 )
 
-func pointerToString(s string) *string {
-	return &s
-}
-
-func pointerToInt(i int) *int {
-	return &i
-}
-
 func pointerToBool(b bool) *bool {
 	return &b
 }
@@ -433,6 +425,5 @@ func TestDelete(t *testing.T) {
 		})
 	}
 }
-
 
 // Add similar test suites for `Update` and `Delete` following the above format.
