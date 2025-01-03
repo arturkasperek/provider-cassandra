@@ -143,54 +143,16 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	role := *cr.Spec.ForProvider.Role
 	keyspace := *cr.Spec.ForProvider.Keyspace
 
-	query := fmt.Sprintf("SELECT permissions FROM system_auth.role_permissions WHERE role = ? AND resource = 'data/%s'", keyspace)
-	var permissions []string
-	iter, err := c.db.Query(ctx, query, role)
+	observedPermissions, resourceExists, err := c.getObservedPermissions(ctx, role, keyspace)
 	if err != nil {
-		return managed.ExternalObservation{}, errors.Wrap(err, errGrantObserve)
+		return managed.ExternalObservation{}, err
 	}
 
-	defer func() {
-		if closeErr := iter.Close(); closeErr != nil && err == nil {
-			err = errors.Wrap(closeErr, "failed to close iterator")
-		}
-	}()
-
-	observedPermissions := make(map[string]bool)
-	resourceExists := false
-	for c.db.Scan(iter, &permissions) {
-		for _, p := range permissions {
-			observedPermissions[p] = true
-		}
-	}
-
-	desiredPermissions := make(map[string]bool)
-	privileges := replaceUnderscoreWithSpace(cr.Spec.ForProvider.Privileges)
-	for _, p := range privileges {
-		desiredPermissions[p] = true
-	}
-
-	upToDate := true
-	for p := range desiredPermissions {
-		if !observedPermissions[p] {
-			upToDate = false
-			break
-		} else {
-			resourceExists = true
-		}
-	}
-
-	atProviderPrivileges := cr.Status.AtProvider.Privileges
-
-	for _, p := range atProviderPrivileges {
-		if !desiredPermissions[p] {
-			// a case where we removed some permissions from CR spec
-			upToDate = false
-		}
-	}
+	desiredPermissions := c.getDesiredPermissions(cr.Spec.ForProvider.Privileges)
+	upToDate := c.comparePermissions(observedPermissions, desiredPermissions, &cr.Status.AtProvider)
 
 	if upToDate {
-		cr.Status.AtProvider.Privileges = privileges
+		cr.Status.AtProvider.Privileges = replaceUnderscoreWithSpace(cr.Spec.ForProvider.Privileges)
 	}
 
 	if resourceExists {
@@ -202,6 +164,58 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		ResourceLateInitialized: false,
 		ResourceUpToDate:        upToDate,
 	}, nil
+}
+
+func (c *external) getObservedPermissions(ctx context.Context, role, keyspace string) (map[string]bool, bool, error) {
+	query := fmt.Sprintf("SELECT permissions FROM system_auth.role_permissions WHERE role = ? AND resource = 'data/%s'", keyspace)
+	iter, err := c.db.Query(ctx, query, role)
+	if err != nil {
+		return nil, false, errors.Wrap(err, errGrantObserve)
+	}
+	defer func() {
+		if closeErr := iter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
+
+	observedPermissions := make(map[string]bool)
+	resourceExists := false
+	var permissions []string
+	for c.db.Scan(iter, &permissions) {
+		for _, p := range permissions {
+			observedPermissions[p] = true
+		}
+		resourceExists = true
+	}
+
+	return observedPermissions, resourceExists, nil
+}
+
+func (c *external) getDesiredPermissions(privileges []v1alpha1.GrantPrivilege) map[string]bool {
+	desiredPermissions := make(map[string]bool)
+	for _, p := range replaceUnderscoreWithSpace(privileges) {
+		desiredPermissions[p] = true
+	}
+	return desiredPermissions
+}
+
+func (c *external) comparePermissions(observed, desired map[string]bool, atProvider *v1alpha1.GrantObservation) bool {
+	upToDate := true
+
+	for p := range desired {
+		if !observed[p] {
+			upToDate = false
+			break
+		}
+	}
+
+	for _, p := range atProvider.Privileges {
+		if !desired[p] {
+			upToDate = false
+		}
+	}
+
+	return upToDate
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {

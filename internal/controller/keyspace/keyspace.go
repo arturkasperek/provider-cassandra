@@ -141,59 +141,20 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotKeyspace)
 	}
 
-	// Separate query to check if the resource exists
-	existsQuery := "SELECT keyspace_name FROM system_schema.keyspaces WHERE keyspace_name = ?"
-	var keyspaceName string
-	existsIter, err := c.db.Query(ctx, existsQuery, meta.GetExternalName(cr))
+	exists, err := c.keyspaceExists(ctx, cr)
 	if err != nil {
-		return managed.ExternalObservation{}, errors.Wrap(err, "failed to check keyspace existence")
+		return managed.ExternalObservation{}, err
 	}
-
-	defer func() {
-		if closeErr := existsIter.Close(); closeErr != nil && err == nil {
-			err = errors.Wrap(closeErr, "failed to close iterator")
-		}
-	}()
-
-	if !c.db.Scan(existsIter, &keyspaceName) {
-		// Keyspace does not exist
+	if !exists {
 		return managed.ExternalObservation{
 			ResourceExists:   false,
 			ResourceUpToDate: false,
 		}, nil
 	}
 
-	observed := &v1alpha1.KeyspaceParameters{
-		ReplicationClass:  new(string),
-		ReplicationFactor: new(int),
-		DurableWrites:     new(bool),
-	}
-
-	detailsQuery := "SELECT replication, durable_writes FROM system_schema.keyspaces WHERE keyspace_name = ?"
-	detailsIter, err := c.db.Query(ctx, detailsQuery, meta.GetExternalName(cr))
+	observed, err := c.getKeyspaceDetails(ctx, cr)
 	if err != nil {
-		return managed.ExternalObservation{}, errors.Wrap(err, errSelectKeyspace)
-	}
-
-	defer func() {
-		if closeErr := detailsIter.Close(); closeErr != nil && err == nil {
-			err = errors.Wrap(closeErr, "failed to close iterator")
-		}
-	}()
-
-	replicationMap := map[string]string{}
-	if !c.db.Scan(detailsIter, &replicationMap, &observed.DurableWrites) {
-		return managed.ExternalObservation{}, errors.New("failed to scan keyspace attributes")
-	}
-
-	if rc, ok := replicationMap["class"]; ok {
-		// Remove Cassandra prefix if present.
-		rc = strings.TrimPrefix(rc, "org.apache.cassandra.locator.")
-		*observed.ReplicationClass = rc
-	}
-	if rf, ok := replicationMap["replication_factor"]; ok {
-		rfInt, _ := strconv.Atoi(rf)
-		*observed.ReplicationFactor = rfInt
+		return managed.ExternalObservation{}, err
 	}
 
 	cr.SetConditions(xpv1.Available())
@@ -203,6 +164,59 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		ResourceLateInitialized: lateInit(observed, &cr.Spec.ForProvider),
 		ResourceUpToDate:        upToDate(observed, &cr.Spec.ForProvider),
 	}, nil
+}
+
+func (c *external) keyspaceExists(ctx context.Context, cr *v1alpha1.Keyspace) (bool, error) {
+	query := "SELECT keyspace_name FROM system_schema.keyspaces WHERE keyspace_name = ?"
+	var keyspaceName string
+	iter, err := c.db.Query(ctx, query, meta.GetExternalName(cr))
+	if err != nil {
+		return false, errors.Wrap(err, "failed to check keyspace existence")
+	}
+	defer func() {
+		if closeErr := iter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
+
+	if !c.db.Scan(iter, &keyspaceName) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (c *external) getKeyspaceDetails(ctx context.Context, cr *v1alpha1.Keyspace) (*v1alpha1.KeyspaceParameters, error) {
+	query := "SELECT replication, durable_writes FROM system_schema.keyspaces WHERE keyspace_name = ?"
+	iter, err := c.db.Query(ctx, query, meta.GetExternalName(cr))
+	if err != nil {
+		return nil, errors.Wrap(err, errSelectKeyspace)
+	}
+	defer func() {
+		if closeErr := iter.Close(); closeErr != nil && err == nil {
+			err = errors.Wrap(closeErr, "failed to close iterator")
+		}
+	}()
+
+	observed := &v1alpha1.KeyspaceParameters{
+		ReplicationClass:  new(string),
+		ReplicationFactor: new(int),
+		DurableWrites:     new(bool),
+	}
+
+	replicationMap := map[string]string{}
+	if !c.db.Scan(iter, &replicationMap, &observed.DurableWrites) {
+		return nil, errors.New("failed to scan keyspace attributes")
+	}
+
+	if rc, ok := replicationMap["class"]; ok {
+		*observed.ReplicationClass = strings.TrimPrefix(rc, "org.apache.cassandra.locator.")
+	}
+	if rf, ok := replicationMap["replication_factor"]; ok {
+		rfInt, _ := strconv.Atoi(rf)
+		*observed.ReplicationFactor = rfInt
+	}
+
+	return observed, nil
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
