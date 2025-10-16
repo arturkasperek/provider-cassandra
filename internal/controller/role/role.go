@@ -48,12 +48,14 @@ const (
 	errTrackPCUsage = "cannot track ProviderConfig usage"
 	errGetPC        = "cannot get ProviderConfig"
 	errGetCreds     = "cannot get credentials"
+	errIterClose    = "cannot close iterator"
 
 	errNewClient   = "cannot create new Service"
 	errSelectRole  = "cannot select role"
 	errCreateRole  = "cannot create role"
 	errUpdateRole  = "cannot update role"
 	errDropRole    = "cannot drop role"
+	errScanRole    = "cannot scan role"
 	maxConcurrency = 5
 )
 
@@ -92,7 +94,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 type connector struct {
 	kube      client.Client
 	usage     resource.Tracker
-	newClient func(creds map[string][]byte, keyspace string) cassandra.DB
+	newClient func(creds map[string][]byte, keyspace string, consistencyLevel string) cassandra.DB
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
@@ -129,7 +131,12 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		creds[k] = []byte(v)
 	}
 
-	db := c.newClient(creds, "")
+	consistencyLevel := ""
+	if pc.Spec.ConsistencyLevel != nil {
+		consistencyLevel = *pc.Spec.ConsistencyLevel
+	}
+
+	db := c.newClient(creds, "", consistencyLevel)
 
 	return &external{db: db}, nil
 }
@@ -138,7 +145,7 @@ type external struct {
 	db cassandra.DB
 }
 
-func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
+func (c *external) Observe(ctx context.Context, mg resource.Managed) (observation managed.ExternalObservation, err error) {
 	cr, ok := mg.(*v1alpha1.Role)
 	if !ok {
 		return managed.ExternalObservation{}, errors.New(errNotRole)
@@ -151,13 +158,20 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.Wrap(err, errSelectRole)
 	}
 
+	var closed bool
 	defer func() {
-		if closeErr := iter.Close(); closeErr != nil && err == nil {
-			err = errors.Wrap(closeErr, "failed to close iterator")
+		if !closed {
+			if closeErr := iter.Close(); closeErr != nil && err == nil {
+				err = errors.Wrap(closeErr, errIterClose)
+			}
 		}
 	}()
 
 	if !c.db.Scan(iter, &isSuperuser, &canLogin) {
+		closed = true
+		if closeErr := iter.Close(); closeErr != nil {
+			return managed.ExternalObservation{}, errors.Wrap(closeErr, errScanRole)
+		}
 		return managed.ExternalObservation{
 			ResourceExists:   false,
 			ResourceUpToDate: false,
@@ -190,7 +204,6 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if err != nil {
 		return managed.ExternalCreation{}, err
 	}
-
 	params := cr.Spec.ForProvider
 	query := fmt.Sprintf("CREATE ROLE IF NOT EXISTS %s WITH SUPERUSER = %t AND LOGIN = %t AND PASSWORD = '%s'",
 		cassandra.QuoteIdentifier(meta.GetExternalName(cr)),
